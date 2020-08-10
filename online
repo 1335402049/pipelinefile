@@ -1,0 +1,112 @@
+pipeline {
+    agent {
+        label 'tomcatVM'
+    }
+    environment {
+        //git仓库地址
+        git_url = ''
+        //凭据id
+        credentialsId = ''
+        //分支
+        git_branch = 'master'
+    }
+    stages {
+        //清理工作空间
+        stage('clean workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        //拉取代码
+        stage('push git code') {
+            steps {
+                git credentialsId:"${credentialsId}",url:"${git_url}",branch: "${git_branch}"
+            }
+        }
+        //打包
+        stage('mvn build') {
+            steps {
+                sh "/usr/local/maven/bin/mvn clean install"
+            }
+        }
+        //sonarqube分析工程
+        stage('sonarqube analysis') {
+            steps {
+                withSonarQubeEnv('sonarServer') {
+                    sh "/usr/local/sonar-scanner-4.4.0.2170-linux/bin/sonar-scanner "+
+                       "-Dsonar.projectKey=myproject "+
+                       "-Dsonar.projectName=myproject "+
+                       "-Dsonar.projectVersion=1.0 "+
+                       "-Dsonar.sources=. "+
+                       "-Dsonar.java.binaries=target/classes "+
+                       "-Dsonar.login=admin "+
+                       "-Dsonar.password=admin "+
+                       "-Dsonar.pdf.username=admin "+
+                       "-Dsonar.pdf.password=admin "+
+                       "-Dsonar.pdf.skip=false"
+                }
+                script {
+                    timeout(1) {
+                        //这里设置超时时间1分钟，不会出现一直卡在检查状态
+                        //利用sonar webhook功能通知pipeline代码检测结果，未通过质量阈，pipeline将会fail
+                        def qg = waitForQualityGate('sonarServer')
+                        //注意：这里waitForQualityGate()中的参数也要与之前SonarQube servers中Name的配置相同
+                        if (qg.status != 'OK') {
+                            error "未通过Sonarqube的代码质量阈检查，请及时修改！failure: ${qg.status}"
+                        }
+                    }
+                }
+
+
+            }
+        }
+        //复制war到tomcat
+        stage('copy war to tomcat') {
+            steps {
+                sh "cp target/ROOT.war /usr/local/apache-tomcat-9.0.36/webapps/ROOT.war"
+            }
+        }
+        //启动tomcat
+        stage('excute shell') {
+            steps {
+                sh "/usr/local/apache-tomcat-9.0.36/bin/startup.sh"
+            }
+        }
+    }
+    post{
+          success {
+            script {
+                cleanWs()
+            }
+          }
+          always {
+            //发邮件
+            script {
+              emailext body: '''<html>
+                <body leftmargin="8" marginwidth="0" topmargin="8" marginheight="4"
+                  offset="0">
+                  <table width="95%" cellpadding="0" cellspacing="0"
+                      style="font-size: 11pt; font-family: Tahoma, Arial, Helvetica, sans-serif">
+                      <tr>
+                          <td><br />
+                          <b><font color="#0B610B">构建信息</font></b>
+                          <hr size="2" width="100%" align="center" /></td>
+                      </tr>
+                      <tr>
+                          <td>
+                              <ul>
+                                  <li>构建名称：${JOB_NAME}</li>
+                                  <li>构建结果: <span style="color:green"> ${BUILD_STATUS}</span></li>
+                                  <li>构建编号：${BUILD_NUMBER}  </li>
+                                  <li>构建者: ${CAUSE}</li>
+                                  <li>变更记录: ${CHANGES,showPaths=true,showDependencies=true,format="<pre><ul><li>提交ID: %r</li><li>提交人：%a</li><li>提交时间：%d</li><li>提交信息：%m</li><li>提交文件：<br />%p</li></ul></pre>",pathFormat="         %p <br />"}
+                              </ul>
+                          </td>
+                      </tr>
+                  </table>
+                </body>
+              </html>''', subject: '${PROJECT_NAME}', to: 'xxxx@qq.com'
+            }
+          }
+    }
+}
